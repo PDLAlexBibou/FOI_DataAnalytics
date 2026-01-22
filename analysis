@@ -1,1 +1,218 @@
 #!/usr/bin/env python3
+
+import pandas as pd
+import numpy as np
+import re
+import argparse
+
+from openpyxl import load_workbook
+from openpyxl.styles import Font, Alignment, PatternFill
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.table import Table, TableStyleInfo
+from openpyxl.formatting.rule import FormulaRule, ColorScaleRule
+from openpyxl.chart import BarChart, Reference
+
+
+def compute_letter_grade(score_0_100: float) -> str:
+    """Convert numeric grade (0-100) into a letter grade."""
+    if score_0_100 >= 90:
+        return "A"
+    elif score_0_100 >= 75:
+        return "B"
+    elif score_0_100 >= 61:
+        return "C"
+    elif score_0_100 >= 50:
+        return "D"
+    return "F"
+
+
+def autosize_columns(ws, max_width=45):
+    """Set column widths automatically based on cell content length."""
+    for col in ws.columns:
+        max_len = 0
+        col_letter = get_column_letter(col[0].column)
+        for cell in col:
+            if cell.value is not None:
+                max_len = max(max_len, len(str(cell.value)))
+        ws.column_dimensions[col_letter].width = min(max_len + 2, max_width)
+
+
+def build_dataframe(input_csv: str) -> pd.DataFrame:
+    df = pd.read_csv(input_csv)
+
+    quiz_cols = [c for c in df.columns if re.fullmatch(r"KVIZ\d+", c)]
+    midterm_cols = [c for c in df.columns if re.fullmatch(r"MIDTERM\d+", c)]
+    project_col = "PROJECT"
+
+    assessment_cols = quiz_cols + midterm_cols + [project_col]
+
+    for col in assessment_cols:
+        df[col] = (
+            df[col]
+            .replace("-", np.nan)
+            .astype(str)
+            .str.replace(",", ".", regex=False)
+        )
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df["MissingCount"] = df[assessment_cols].isna().sum(axis=1)
+    df[assessment_cols] = df[assessment_cols].fillna(0)
+
+    df["QuizTotal"] = df[quiz_cols].sum(axis=1)
+    df["MidtermTotal"] = df[midterm_cols].sum(axis=1)
+    df["ProjectPoints"] = df[project_col]
+
+    df["TotalScore"] = df["QuizTotal"] + df["MidtermTotal"] + df["ProjectPoints"]
+
+    df["3PointsEachMidterm"] = (df[midterm_cols] >= 3).all(axis=1)
+    df["25PointsMidtermTotal"] = df["MidtermTotal"] >= 25
+    df["MeetsMidtermCriteria"] = df["3PointsEachMidterm"] & df["25PointsMidtermTotal"]
+
+    df["Final Grade"] = df["TotalScore"].apply(compute_letter_grade)
+
+    df.loc[~df["MeetsMidtermCriteria"], "Final Grade"] = "F"
+
+    df["Result"] = np.where(df["Final Grade"].isin(["A", "B", "C", "D"]), "PASS", "FAIL")
+
+    df = df.sort_values(by="TotalScore", ascending=False)
+
+    return df
+
+
+def export_professor_excel(df: pd.DataFrame, output_xlsx: str):
+    quiz_cols = [c for c in df.columns if re.fullmatch(r"KVIZ\d+", c)]
+    midterm_cols = [c for c in df.columns if re.fullmatch(r"MIDTERM\d+", c)]
+
+    grade_counts = (
+        df["Final Grade"]
+        .value_counts()
+        .reindex(["A", "B", "C", "D", "F"], fill_value=0)
+        .astype(int)
+    )
+
+    pass_rate = (df["Result"] == "PASS").mean() * 100
+
+    summary_rows = [
+        ["Total students", len(df)],
+        ["Pass rate (%)", round(pass_rate, 1)],
+        ["Average points so far", round(df["TotalScore"].mean(), 2)],
+        ["Median points so far", round(df["TotalScore"].median(), 2)],
+        ["Students with missing entries", int((df["MissingCount"] > 0).sum())],
+    ]
+    summary_df = pd.DataFrame(summary_rows, columns=["Metric", "Value"])
+
+    grade_dist_df = grade_counts.reset_index()
+    grade_dist_df.columns = ["Final Grade", "Count"]
+
+    with pd.ExcelWriter(output_xlsx, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="Grades", index=False)
+        summary_df.to_excel(writer, sheet_name="Summary", index=False, startrow=0)
+        grade_dist_df.to_excel(writer, sheet_name="Summary", index=False, startrow=8)
+
+    wb = load_workbook(output_xlsx)
+    ws = wb["Grades"]
+    ws_sum = wb["Summary"]
+
+    ws.freeze_panes = "C2"
+
+    header_fill = PatternFill("solid", fgColor="1F4E79")
+    header_font = Font(color="FFFFFF", bold=True)
+    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    ws.row_dimensions[1].height = 24
+    for cell in ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = header_align
+
+    last_row = ws.max_row
+    last_col = ws.max_column
+    table_ref = f"A1:{get_column_letter(last_col)}{last_row}"
+
+    table = Table(displayName="GradesTable", ref=table_ref)
+    style = TableStyleInfo(
+        name="TableStyleMedium9",
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=True,
+        showColumnStripes=False,
+    )
+    table.tableStyleInfo = style
+    ws.add_table(table)
+
+    autosize_columns(ws)
+
+    col_map = {ws.cell(row=1, column=i).value: i for i in range(1, last_col + 1)}
+    numeric_cols = quiz_cols + midterm_cols + [
+        "QuizTotal", "MidtermTotal", "ProjectPoints",
+        "TotalRawPoints", "TotalScore_0_100"
+    ]
+
+    for name in numeric_cols:
+        if name in col_map:
+            col_idx = col_map[name]
+            for r in range(2, last_row + 1):
+                ws.cell(row=r, column=col_idx).number_format = "0.00"
+
+    if "TotalScore_0_100" in col_map:
+        score_col_letter = get_column_letter(col_map["TotalScore_0_100"])
+        score_range = f"{score_col_letter}2:{score_col_letter}{last_row}"
+        ws.conditional_formatting.add(
+            score_range,
+            ColorScaleRule(
+                start_type="num", start_value=0, start_color="F8696B",
+                mid_type="num", mid_value=60, mid_color="FFEB84",
+                end_type="num", end_value=100, end_color="63BE7B",
+            )
+        )
+
+    if "Result" in col_map:
+        result_col_letter = get_column_letter(col_map["Result"])
+        full_range = f"A2:{get_column_letter(last_col)}{last_row}"
+
+        pass_fill = PatternFill("solid", fgColor="E2F0D9")
+        fail_fill = PatternFill("solid", fgColor="F8D7DA")
+
+        ws.conditional_formatting.add(
+            full_range,
+            FormulaRule(formula=[f'${result_col_letter}2="PASS"'], fill=pass_fill)
+        )
+        ws.conditional_formatting.add(
+            full_range,
+            FormulaRule(formula=[f'${result_col_letter}2="FAIL"'], fill=fail_fill)
+        )
+
+    ws_sum["A1"].font = Font(bold=True, size=14)
+    ws_sum["A1"].value = "Course Results Summary (Points So Far)"
+
+    autosize_columns(ws_sum)
+
+    chart = BarChart()
+    chart.title = "Grade Distribution"
+    chart.y_axis.title = "Students"
+    chart.x_axis.title = "Grade"
+
+    data = Reference(ws_sum, min_col=2, min_row=9, max_row=14)   # Count column + header
+    cats = Reference(ws_sum, min_col=1, min_row=10, max_row=14)  # Grade names only
+
+    chart.add_data(data, titles_from_data=True)
+    chart.set_categories(cats)
+
+    ws_sum.add_chart(chart, "D9")
+
+    wb.save(output_xlsx)
+    print(f"✅ Professor-friendly Excel report created: {output_xlsx}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Create a professor-friendly Excel report (no scaling/max scores).")
+    parser.add_argument("--input", required=True, help="Input CSV file")
+    parser.add_argument("--output", default="professor_report.xlsx", help="Output Excel report filename")
+    args = parser.parse_args()
+
+    df = build_dataframe(args.input)
+    export_professor_excel(df, args.output)
+
+
+if __name__ == "__main__":
+    main()
