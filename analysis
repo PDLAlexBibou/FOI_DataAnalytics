@@ -11,7 +11,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.formatting.rule import FormulaRule, ColorScaleRule
 from openpyxl.chart import BarChart, Reference
-
+from faker import Faker
 
 def compute_letter_grade(score_0_100: float) -> str:
     """Convert numeric grade (0-100) into a letter grade."""
@@ -39,6 +39,7 @@ def autosize_columns(ws, max_width=45):
 
 def build_dataframe(input_csv: str) -> pd.DataFrame:
     df = pd.read_csv(input_csv)
+    df = fake_student_names(df, seed=42, locale="en_US")
 
     quiz_cols = [c for c in df.columns if re.fullmatch(r"KVIZ\d+", c)]
     midterm_cols = [c for c in df.columns if re.fullmatch(r"MIDTERM\d+", c)]
@@ -202,6 +203,42 @@ def export_professor_excel(df: pd.DataFrame, output_xlsx: str):
 
     wb.save(output_xlsx)
     print(f"✅ Professor-friendly Excel report created: {output_xlsx}")
+
+def fake_student_names(df: pd.DataFrame, seed: int = 42, locale: str = "en_US") -> pd.DataFrame:
+    """
+    Replace 'First name' and 'Surname' with fake names.
+    - Deterministic with the same seed
+    - Keeps 2 first names if original had 2+ parts
+    - Ensures uniqueness (no duplicate fake full names)
+    """
+    if "First name" not in df.columns or "Surname" not in df.columns:
+        raise KeyError("Expected columns: 'First name' and 'Surname'")
+
+    fake = Faker(locale)
+    Faker.seed(seed)
+
+    df = df.copy()
+    used = set()
+
+    for i, row in df.iterrows():
+        original_first = str(row["First name"]) if pd.notna(row["First name"]) else ""
+        # Count how many parts were in the original first name (e.g., "Iva Lorena" -> 2)
+        first_parts = [p for p in original_first.split() if p.strip()]
+        n_first = max(1, len(first_parts))
+
+        # Generate a unique fake full name
+        while True:
+            fake_first = " ".join(fake.first_name() for _ in range(n_first))
+            fake_last = fake.last_name()
+            full = (fake_first, fake_last)
+            if full not in used:
+                used.add(full)
+                break
+
+        df.at[i, "First name"] = fake_first
+        df.at[i, "Surname"] = fake_last
+
+    return df
 
 
 def main():
