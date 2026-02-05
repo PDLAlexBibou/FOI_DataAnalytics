@@ -1,7 +1,18 @@
-The Application by using this command :
-python analysis --input Ocjene.csv --output final_results.xlsx
+Grade Analysis Tool
 
-The results are stored in the final_results.xlsx.
+Run the application using this command:
+python analysis.py --input Ocjene.csv --output final_results.png
 
-Some libraries might be needed to be able to launch the program such as :
-pandas, numpy, re, argparse, openpyxl, faker
+The results are displayed as a visual report in final_results.png.
+
+Required Libraries
+pip install pandas numpy matplotlib faker
+
+Output
+The PNG report includes:
+
+Summary statistics (total students, pass rate, averages)
+Grade distribution bar chart
+Pass/Fail pie chart
+Score distribution histogram
+Top 25 students table (color-coded by pass/fail status)
